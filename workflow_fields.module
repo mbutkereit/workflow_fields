@@ -1,0 +1,384 @@
+<?php
+
+/**
+ * @file
+ * This module adds to workflow.module the ability to specify, for each state,
+ * which node fields should be visible and/or editable. It is a useful feature
+ * when workflows demand that certain information be hidden or read-only to
+ * certain roles.
+ */
+
+use Drupal\Core\Access\AccessResultAllowed;
+use Drupal\Core\Form\FormStateInterface;
+use Drupal\Core\Entity\ContentEntityInterface;
+use Drupal\Core\Field\FieldDefinitionInterface;
+use Drupal\Core\Session\AccountInterface;
+use Drupal\Core\Field\FieldItemListInterface;
+
+/**
+ * Implements hook_help().
+ */
+function workflow_fields_help($section) {
+  switch ($section) {
+    case 'admin/modules#description':
+      return t('Add per-state field settings to workflows.');
+  }
+}
+
+/**
+ * TODO  add settings of the required field if possible.
+ */
+function workflow_fields_form_alter(&$form, FormStateInterface &$form_state, $form_id) {
+  if ($form_id == 'field_config_edit_form') {
+    // Add submit handler.
+    $form['actions']['submit']['#submit'][] = 'workflow_fields_submit_handler';
+
+    // Reset defaults.
+    $temp = $form['required'];
+    unset($form['required']);
+
+    $entity = $form_state->getFormObject()->getEntity();
+    /** @var \Drupal\content_moderation\ModerationInformationInterface $moderation_info */
+    $moderation_info = Drupal::service('content_moderation.moderation_information');
+
+    /** @var \Drupal\workflows\WorkflowInterface $workflow */
+    $workflow = $moderation_info->getWorkflowForEntityTypeAndBundle($entity->getTargetEntityTypeId(), $entity->getTargetBundle());
+    if (!empty($workflow)) {
+      $states = $workflow->getTypePlugin()->getStates();
+
+      $entity_identifiere = $entity->getTargetEntityTypeId() . '.' . $entity->getTargetBundle();
+      $entity_config = \Drupal::entityTypeManager()
+        ->getStorage('workflow_fields_config')
+        ->load($entity_identifiere);
+
+      $options = ['visible', 'required', 'read only'];
+
+      $field_name = $entity->getName();
+
+      $form['workflow_fields'] = [
+        '#type' => 'details',
+        '#title' => t('Workflow Fields'),
+        '#open' => TRUE,
+        '#tree' => TRUE,
+      ];
+
+      $form['workflow_fields']['permissions'] = [
+        '#type' => 'table',
+        '#header' => [t('options')],
+        '#id' => 'permissions',
+        '#attributes' => ['class' => ['permissions', 'js-permissions']],
+        '#sticky' => TRUE,
+        '#tree' => TRUE,
+      ];
+
+      foreach ($states as $state) {
+        $form['workflow_fields']['permissions']['#header'][] = [
+          'data' => !empty($state->label()) ? $state->label() : $state->id(),
+          'class' => ['checkbox'],
+        ];
+
+        foreach ($options as $option) {
+          $form['workflow_fields']['permissions'][$option]['a'] = [
+            '#markup' => t($option),
+          ];
+          $form['workflow_fields']['permissions'][$option][$state->id()] = [
+            '#title' => $option . ': ' . $state->id(),
+            '#title_display' => 'invisible',
+            '#wrapper_attributes' => [
+              'class' => ['checkbox'],
+            ],
+            '#type' => 'checkbox',
+            '#default_value' => empty($entity_config->getConfigFieldByOp($field_name, $state->id(), $option)) ? 0 : $entity_config->getConfigFieldByOp($field_name, $state->id(), $option),
+            '#parents' => ['permissions', $state->id(), $option],
+          ];
+        }
+      }
+    }
+
+    // First try references todo.
+    $dsds = \Drupal::entityManager()
+      ->getStorage('field_storage_config')
+      ->getQuery()
+      ->condition('settings.target_type', $entity->getTargetEntityTypeId())
+      ->execute();
+
+    $dammy = Drupal::entityManager()
+      ->getStorage('field_storage_config')->loadMultiple($dsds);
+    $entity_type = Drupal::entityManager()
+      ->getStorage('field_config')
+      ->getQuery()
+      ->condition('entity_type', 'node')
+      ->condition('bundle', 'article')
+      ->condition('settings.handler_settings.target_bundles', $entity->getTargetBundle(), 'IN')
+      ->execute();
+    $loading = Drupal::entityManager()
+      ->getStorage('field_config')->loadMultiple($entity_type);
+
+    $workflows = Drupal::entityManager()
+      ->getStorage('workflow')->loadMultiple();
+    $workflows_completed = [];
+    foreach ($workflows as $workflow_name => $workflow) {
+      $workflow_array = $workflow->toArray();
+      if (isset($workflow_array['type_settings'])) {
+        foreach ($workflow_array['type_settings']['entity_types'] as $entity_type => $bundles) {
+          $workflows_completed[$workflow_name] = [];
+          foreach ($bundles as $bundle) {
+            $workflows_completed[$workflow_name][$entity_type] = $bundle;
+          }
+        }
+      }
+      $check = NULL;
+    }
+    $dammy = NULL;
+    if (!empty($loading)) {
+      if (!empty($workflows_completed) && is_array($workflows_completed)) {
+        foreach ($workflows_completed as $workflow_name => $workflow_el) {
+          foreach ($workflow_el as $entity_type => $bundle) {
+            $entity_identifiere = $entity_type . '.' . $bundle;
+            $states = $workflows[$workflow_name]->getTypePlugin()->getStates();
+            $entity_config = \Drupal::entityTypeManager()
+              ->getStorage('workflow_fields_config')
+              ->load($entity_identifiere);
+
+            $options = ['visible', 'required', 'read only'];
+
+            $field_name = $entity->getName();
+
+            $form['workflow_fields'] = [
+              '#type' => 'details',
+              '#title' => t('Workflow Fields for %entity_type %bundle | %workflow_name',
+            [
+              '%entity_type' => $entity_type,
+              '%bundle' => $bundle,
+              '%workflow_name' => $workflow_name,
+            ]),
+              '#open' => TRUE,
+              '#tree' => TRUE,
+            ];
+
+            $form['workflow_fields']['permissions'] = [
+              '#type' => 'table',
+              '#header' => [t('options')],
+              '#id' => 'permissions',
+              '#attributes' => ['class' => ['permissions', 'js-permissions']],
+              '#sticky' => TRUE,
+              '#tree' => TRUE,
+            ];
+
+            foreach ($states as $state) {
+              $form['workflow_fields']['permissions']['#header'][] = [
+                'data' => !empty($state->label()) ? $state->label() : $state->id(),
+                'class' => ['checkbox'],
+              ];
+
+              foreach ($options as $option) {
+                $form['workflow_fields']['permissions'][$option]['a'] = [
+                  '#markup' => t($option),
+                ];
+                $form['workflow_fields']['permissions'][$option][$state->id()] = [
+                  '#title' => $option . ': ' . $state->id(),
+                  '#title_display' => 'invisible',
+                  '#wrapper_attributes' => [
+                    'class' => ['checkbox'],
+                  ],
+                  '#type' => 'checkbox',
+                  '#default_value' => empty($entity_config->getConfigFieldByOp($field_name, $state->id(), $option)) ? 0 : $entity_config->getConfigFieldByOp($field_name, $state->id(), $option),
+                  '#parents' => ['reference' , $entity_type, $bundle, $state->id(), $option],
+                ];
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ *
+ */
+function workflow_fields_submit_handler(&$form, FormStateInterface &$form_state) {
+  $test = NULL;
+  /** @var \Drupal\Core\Entity\ContentEntity $entity */
+  $entity = $form_state->getFormObject()->getEntity();
+
+  $field_name = $entity->getName();
+
+  // Check if second not empty();
+  $entity_identifiere = $entity->getTargetEntityTypeId() . '.' . $entity->getTargetBundle();
+  $config_entity = _workflow_fields_get_config_entity($entity_identifiere);
+
+  $current_state[$field_name] = $form_state->getValue('permissions');
+
+  $config_entity->set('states', $current_state);
+
+  $config_entity->save();
+
+  /**
+   * Save Reference Entities.
+   *
+   * TODO das ist extra.
+   */
+
+  $references = $form_state->getValue('reference');
+  foreach ($references as $entity_type => $reference) {
+    foreach ($reference as $bundle => $states) {
+      $entity_identifiere = $entity_type . '.' . $bundle;
+      $config_entity = _workflow_fields_get_config_entity($entity_identifiere);
+      $current_state[$field_name] = $form_state->getValue('permissions');
+      $config_entity->set('states', $current_state);
+    }
+
+  }
+  $dummy = NULL;
+}
+
+/**
+ * @param $id
+ * @return \Drupal\Core\Entity\EntityInterface|null
+ * @throws \Drupal\Component\Plugin\Exception\InvalidPluginDefinitionException
+ * @throws \Drupal\Component\Plugin\Exception\PluginNotFoundException
+ */
+function _workflow_fields_get_config_entity($id) {
+  try {
+    $entity = \Drupal::entityTypeManager()
+      ->getStorage('workflow_fields_config')
+      ->load($id);
+    if (empty($entity)) {
+      $entity = \Drupal::entityManager()
+        ->getStorage('workflow_fields_config')
+        ->create(['id' => $id, 'label' => $id]);
+    }
+  } catch (\Exception $e) {
+    Drupal::logger('Workflow Fields')->error('Can\'t create config');
+    $entity = NULL;
+  }
+
+  return $entity;
+}
+
+/**
+ * Implements hook_form_BASE_FORM_ID_alter().
+ * todo for entities.
+ */
+function workflow_fields_form_node_form_alter(&$form, FormStateInterface &$form_state, $form_id) {
+  $entity = $form_state->getFormObject()->getEntity();
+  $sid = $entity->moderation_state->value;;
+  $entity_identifiere = $entity->getEntityTypeId() . '.' . $entity->bundle();
+  $config = _workflow_fields_get_config_entity($entity_identifiere);
+  $field_states = $config->getConfig();
+  foreach ($field_states as $field_name => $states) {
+    if ($entity->hasField($field_name)) {
+      $current_config = $config->getConfigFieldByState($field_name, $sid);
+      foreach ($current_config as $config_name => $state) {
+
+        switch ($config_name) {
+          case 'visible':
+            $form[$field_name]['#access'] = (bool) $state;
+            break;
+
+          case 'read only':
+            $form[$field_name]['#attributes']['readonly'] = 'readonly';
+            break;
+
+          case 'required':
+            _workflow_fields_change_field_value($form[$field_name], '#required', (bool) $state);
+            break;
+        }
+
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_entity_field_access()
+ */
+function workflow_fields_entity_field_access($op, FieldDefinitionInterface $field_definition, AccountInterface $account, FieldItemListInterface $items = NULL) {
+  return AccessResultAllowed::allowed();
+
+  $entity = NULL;
+  if (!empty($items)) {
+    $entity = $items->getEntity();
+  }
+  if ($entity instanceof ContentEntityInterface) {
+    $sid = NULL;
+    $workflow_fields = [''];
+
+    $moderation_state = $entity->moderation_state->value;
+
+    if (!empty($moderation_state)) {
+      // Workflow 2+
+      // check if workflows exist.
+      if (function_exists('_workflow_info_fields')) {
+        $workflow_fields = _workflow_info_fields($node, $entity_type);
+        if (0 === count($workflow_fields)) {
+          return TRUE;
+        }
+      }
+
+      /** @var \Drupal\content_moderation\ModerationInformationInterface $moderation_info */
+      $moderation_info = Drupal::service('content_moderation.moderation_information');
+
+      /** @var \Drupal\workflows\WorkflowInterface $workflow */
+      $workflow = $moderation_info->getWorkflowForEntity($entity);
+
+      $active_state = $workflow->getTypePlugin()->getState($moderation_state);
+      $state_name = !empty($active_state->label()) ? $active_state->label() : $active_state->id();
+
+      list($visibles, $editables) = _workflow_fields_compute_permissions($active_state->id(), $entity->id(), $entity, $op);
+
+      if (isset($visibles[$field['field_name']])) {
+        $is_accessible = ($op == 'view') ? $visibles[$field['field_name']] : ($visibles[$field['field_name']] && $editables[$field['field_name']]);
+        if ($is_accessible) {
+          return TRUE;
+        }
+      }
+      return FALSE;
+    }
+    return AccessResultAllowed::allowed();
+  }
+  else {
+    return AccessResultAllowed::allowed();
+  }
+}
+
+
+
+/**
+ * Implements hook_field_widget_form_alter().
+ */
+function tour_importer_field_widget_form_alter(
+  &$element,
+  FormStateInterface $form_state,
+  $context
+) {
+  \Drupal::getContainer()
+    ->get('tour_importer.hooks.tour_importer_field_widget_form_alter')
+    ->executeAction($element, $form_state, $context);
+}
+
+
+/**
+ * @param $form
+ * @param $field_name
+ * @param $value
+ * @param int $deep
+ * @return null
+ */
+function _workflow_fields_change_field_value(&$form, $field_name, $value, $deep = 10) {
+  if ($deep < 0 || !is_array($form)) {
+    return NULL;
+  }
+
+  if (isset($form[$field_name])) {
+    $form[$field_name] = $value;
+  }
+
+  foreach ($form as $sub_element) {
+    if (is_array($sub_element)) {
+      _workflow_fields_change_field_value($form, $field_name, $value, $deep - 1);
+    }
+  }
+
+}

@@ -1,0 +1,8 @@
+name: Workflow Fields
+type: module
+description: Adds per-field settings to each workflow state.
+package: Workflow
+core: '8.x'
+dependencies:
+  - field
+  - workflows

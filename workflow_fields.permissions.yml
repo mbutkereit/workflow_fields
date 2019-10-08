@@ -1,0 +1,3 @@
+bypass field restrictions:
+  title: 'Bypass Field Restrictions'
+  description: 'Ignore field restrictions configured with Workflow Fields module.'
